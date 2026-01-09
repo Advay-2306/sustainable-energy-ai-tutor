@@ -8,9 +8,7 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 import os
 
-# -------------------------------------------------
 # 1. Constants and Setup
-# -------------------------------------------------
 INDEX_FOLDER = "faiss_index"
 PDF_FOLDER = "pdfs"
 os.makedirs(PDF_FOLDER, exist_ok=True)
@@ -138,7 +136,7 @@ for k, v in defaults.items():
 # 5. UI Layout
 st.title("🌱 Sustainable Energy AI Tutor")
 
-# ---------- Sidebar ----------
+# Sidebar
 with st.sidebar:
     st.header("📄 Manage Documents")
     uploaded_file = st.file_uploader("Upload a PDF", type="pdf")
@@ -162,7 +160,7 @@ with st.sidebar:
 
         st.success(f"Added {uploaded_file.name}")
 
-# ---------- Navigation ----------
+# Navigation
 tab = st.radio(
     "Navigation",
     ["Chat Q&A", "Quiz Mode"],
@@ -188,9 +186,7 @@ if tab == "Chat Q&A":
         for doc in result["source_documents"]:
             st.write(f"- {doc.metadata.get('source', 'Unknown')}")
 
-# -------------------------------------------------
 # 7. Quiz Mode Tab
-# -------------------------------------------------
 elif tab == "Quiz Mode":
     st.header("🧠 Quiz Mode")
 

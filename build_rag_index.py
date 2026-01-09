@@ -6,7 +6,7 @@ import os
 
 # 1. Set paths
 PDF_FOLDER = "pdfs"
-INDEX_FOLDER = "faiss_index" # Where the vector DB will be saved
+INDEX_FOLDER = "faiss_index"
 
 # 2. Load all PDFs from the folder
 print("Loading PDFs...")
