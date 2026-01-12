@@ -16,53 +16,56 @@ os.makedirs(PDF_FOLDER, exist_ok=True)
 embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 llm = ChatOllama(model="qwen2.5:1.5b-instruct-q5_K_M", temperature=0.3)
 
-qa_prompt_template = """You are a helpful, accurate, and concise AI tutor for sustainable energy topics.
+qa_prompt_template = """<role>helpful_accurate_tutor</role>
 
-IMPORTANT RULES:
-- Answer ONLY using the information provided in the context below.
-- If the context doesn't contain the answer or you are not sure, respond ONLY with: "I don't have enough information to answer this question."
-- Do NOT make up information, speculate, or use general knowledge outside the context.
-- Keep answers clear, factual, and brief.
-- Do NOT add greetings, conclusions, suggestions, or extra commentary.
+<rules>
+- Answer ONLY from the context.
+- If context has no answer or unsure, output ONLY: "I don't have enough information to answer this question."
+- NEVER make up info. NEVER speculate. NEVER use outside knowledge.
+- Keep answers clear, factual, brief. NO greetings. NO conclusions. NO extra commentary.
+- Repeat: NEVER make up info.
+</rules>
 
-Context:
+<context>
 {context}
+</context>
 
-Question:
+<question>
 {question}
+</question>
 
-Answer:"""
+<output>Start answer now:"""
 
 QA_PROMPT = PromptTemplate(
     template=qa_prompt_template,
     input_variables=["context", "question"]
 )
 
-quiz_prompt_template = """You are a strict quiz question generator. Your ONLY task is to create ONE multiple-choice question.
+quiz_prompt_template = """<role>strict_quiz_generator</role>
 
-STRICT FORMATTING RULES - YOU MUST FOLLOW THEM EXACTLY:
-1. Generate exactly ONE question based ONLY on the provided context
-2. Difficulty: {difficulty} (easy = basic facts, medium = explanations, hard = multi-step reasoning)
-3. Output MUST be EXACTLY 6 lines in this exact order with no extra spaces, lines, words, explanations, or text anywhere else:
-Question: [clear, well-formed question]
-A) [plausible wrong or correct option]
-B) [option]
-C) [option]
-D) [option]
-Correct: [only one uppercase letter: A, B, C, or D]
+<rules>
+- Create EXACTLY ONE multiple-choice question ONLY from context.
+- Difficulty: {difficulty} (easy: basic facts; medium: simple explanations; hard: reasoning or comparisons).
+- Options: 1 correct, 3 plausible wrong. Mix them up.
+- NEVER explain question or answer. NEVER add extra words, intros, notes, hints.
+- Output EXACTLY 6 lines: Question line, A) B) C) D) lines, Correct line.
+- NO extra spaces/lines/text. Repeat: NO extras anywhere.
+</rules>
 
-FORBIDDEN BEHAVIORS (NEVER DO THESE):
-- Do NOT write any introduction ("Here is a question", "Question:", etc.)
-- Do NOT explain the question or answer
-- Do NOT repeat the context
-- Do NOT add "The correct answer is..." anywhere except the last line
-- Do NOT include the correct answer in the question text or options
-- Do NOT add notes, hints, difficulty level, or any other text
+<example_for_format_only>
+Question: What is the capital of France?
+A) Berlin
+B) Paris
+C) London
+D) Madrid
+Correct: B
+</example_for_format_only>
 
-Context (use this to create an accurate question):
+<context>
 {context}
+</context>
 
-Now output ONLY the 6 lines exactly as specified. Nothing else."""
+<output>BEGIN QUIZ NOW. Start with "Question:":"""
 
 QUIZ_PROMPT = PromptTemplate(
     template=quiz_prompt_template,
@@ -104,13 +107,26 @@ def generate_quiz(difficulty):
     )
 
     response = llm.invoke(prompt).content.strip()
-    lines = response.split("\n")
+    lines = [line.strip() for line in response.split("\n") if line.strip()]
 
-    quiz_lines = [l for l in lines if not l.startswith("Correct:")]
-    correct_line = next((l for l in lines if l.startswith("Correct:")), None)
+    # Extract first 5 lines (Question + 4 options)
+    if len(lines) >= 5:
+        question_part = "\n".join(lines[:5])
+    else:
+        question_part = "\n".join(lines)
 
-    correct = correct_line.split(":")[1].strip()[0] if correct_line else "B"
-    return "\n".join(quiz_lines), correct
+    # Find correct answer
+    correct = "A"  # safe default
+    for line in lines:
+        if line.lower().startswith("correct:"):
+            try:
+                correct = line.split(":", 1)[1].strip().upper()[0]
+                if correct in "ABCD":
+                    break
+            except:
+                pass
+
+    return question_part, correct
 
 
 def evaluate_answer(user, correct):
@@ -169,22 +185,88 @@ tab = st.radio(
 )
 st.session_state.active_tab = tab
 
-# 6. Chat Q&A Tab
+# 6. Chat Q&A Tab – Modern version
 if tab == "Chat Q&A":
-    st.header("💬 Ask Questions")
+    # Initialize chat history if not exists
+    if "chat_messages" not in st.session_state:
+        st.session_state.chat_messages = []
 
-    query = st.text_input("Ask about sustainable energy:")
+    # Welcome message (only shown once)
+    if len(st.session_state.chat_messages) == 0:
+        welcome = {
+            "role": "assistant",
+            "content": (
+                "🌱 **Welcome to your Sustainable Energy AI Tutor!**\n\n"
+                "You can ask me anything about:\n"
+                "• Solar and wind energy\n"
+                "• Energy efficiency\n"
+                "• Carbon footprints & climate solutions\n"
+                "• Renewable technologies, storage, policies...\n\n"
+                "All answers are based **only** on the documents you provided.\n"
+                "Just type your question below 👇"
+            )
+        }
+        st.session_state.chat_messages.append(welcome)
 
-    if query:
-        with st.spinner("Thinking..."):
-            result = qa_chain.invoke({"query": query})
+    # Display chat history
+    for message in st.session_state.chat_messages:
+        avatar = "👤" if message["role"] == "user" else "🌱"
+        with st.chat_message(message["role"], avatar=avatar):
+            st.markdown(message["content"])
 
-        st.write("**Answer:**")
-        st.write(result["result"])
+            # Show sources in nice expander (only for assistant messages)
+            if message["role"] == "assistant" and "sources" in message:
+                with st.expander("📚 Sources", expanded=False):
+                    for src in message["sources"]:
+                        st.caption(os.path.basename(src))
 
-        st.write("**Sources:**")
-        for doc in result["source_documents"]:
-            st.write(f"- {doc.metadata.get('source', 'Unknown')}")
+    # Chat input at the bottom
+    if prompt := st.chat_input("Ask about sustainable energy..."):
+        # Add user message
+        user_msg = {"role": "user", "content": prompt}
+        st.session_state.chat_messages.append(user_msg)
+
+        # Show user message immediately
+        with st.chat_message("user", avatar="👤"):
+            st.markdown(prompt)
+
+        # Generate AI response
+        with st.chat_message("assistant", avatar="🌱"):
+            with st.spinner("Thinking..."):
+                try:
+                    result = qa_chain.invoke({"query": prompt})
+                    answer = result["result"].strip()
+
+                    # Clean up possible unwanted prefixes from prompt
+                    if answer.startswith("Start answer now:"):
+                        answer = answer.replace("Start answer now:", "", 1).strip()
+
+                    sources = [doc.metadata.get("source", "Unknown")
+                              for doc in result["source_documents"]]
+
+                    # Store both answer and sources
+                    ai_msg = {
+                        "role": "assistant",
+                        "content": answer,
+                        "sources": sources
+                    }
+                    st.markdown(answer)
+
+                    if sources:
+                        with st.expander("📚 Sources", expanded=False):
+                            for src in sources:
+                                st.caption(os.path.basename(src))
+
+                except Exception as e:
+                    error_msg = f"Sorry, something went wrong: {str(e)}"
+                    st.error(error_msg)
+                    ai_msg = {"role": "assistant", "content": error_msg}
+
+        # Save assistant response to history
+        st.session_state.chat_messages.append(ai_msg)
+
+        # Auto-scroll to bottom (nice touch)
+        st.rerun()
 
 # 7. Quiz Mode Tab
 elif tab == "Quiz Mode":
