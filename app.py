@@ -17,7 +17,6 @@ embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 llm = ChatOllama(model="qwen2.5:1.5b-instruct-q5_K_M", temperature=0.3)
 
 qa_prompt_template = """<role>helpful_accurate_tutor</role>
-
 <rules>
 - Answer ONLY from the context.
 - If context has no answer or unsure, output ONLY: "I don't have enough information to answer this question."
@@ -42,30 +41,28 @@ QA_PROMPT = PromptTemplate(
 )
 
 quiz_prompt_template = """<role>strict_quiz_generator</role>
+<critical_rules>
+- Generate a COMPLETELY NEW multiple-choice question using ONLY the facts in the provided context.
+- Difficulty level: {difficulty}
+- Create exactly 1 question with 4 options (A,B,C,D).
+- Output format: exactly these 7 lines:
 
-<rules>
-- Create EXACTLY ONE multiple-choice question ONLY from context.
-- Difficulty: {difficulty} (easy: basic facts; medium: simple explanations; hard: reasoning or comparisons).
-- Options: 1 correct, 3 plausible wrong. Mix them up.
-- NEVER explain question or answer. NEVER add extra words, intros, notes, hints.
-- Output EXACTLY 6 lines: Question line, A) B) C) D) lines, Correct line.
-- NO extra spaces/lines/text. Repeat: NO extras anywhere.
-</rules>
+Question: [your new question here]
+A) [option]
+B) [option]
+C) [option]
+D) [option]
+Correct: [A/B/C/D]
+Explanation: [Brief reason why this answer is correct]
 
-<example_for_format_only>
-Question: What is the capital of France?
-A) Berlin
-B) Paris
-C) London
-D) Madrid
-Correct: B
-</example_for_format_only>
+- No introductions, no extra text. Start directly with "Question: ".
+</critical_rules>
 
 <context>
 {context}
 </context>
 
-<output>BEGIN QUIZ NOW. Start with "Question:":"""
+Produce the quiz question now."""
 
 QUIZ_PROMPT = PromptTemplate(
     template=quiz_prompt_template,
@@ -98,35 +95,38 @@ qa_chain = RetrievalQA.from_chain_type(
 
 # 3. Quiz Utilities
 def generate_quiz(difficulty):
-    docs = retriever.invoke("sustainable energy concepts")
+
+    docs = retriever.invoke(f"sustainable energy {difficulty} concepts")
     context = " ".join(doc.page_content for doc in docs[:3])
 
-    prompt = QUIZ_PROMPT.format(
-        context=context,
-        difficulty=difficulty
-    )
-
+    prompt = QUIZ_PROMPT.format(context=context, difficulty=difficulty)
     response = llm.invoke(prompt).content.strip()
-    lines = [line.strip() for line in response.split("\n") if line.strip()]
 
-    # Extract first 5 lines (Question + 4 options)
-    if len(lines) >= 5:
-        question_part = "\n".join(lines[:5])
-    else:
-        question_part = "\n".join(lines)
+    try:
+        lines = [l.strip() for l in response.split("\n") if l.strip()]
 
-    # Find correct answer
-    correct = "A"  # safe default
-    for line in lines:
-        if line.lower().startswith("correct:"):
-            try:
-                correct = line.split(":", 1)[1].strip().upper()[0]
-                if correct in "ABCD":
-                    break
-            except:
-                pass
+        # Simple extraction based on prefixes
+        question = next((l for l in lines if l.startswith("Question:")), "Question not found")
+        options = [l for l in lines if l[0] in ['A', 'B', 'C', 'D'] and ')' in l[:3]]
+        correct_line = next((l for l in lines if l.startswith("Correct:")), None)
+        explanation_line = next((l for l in lines if l.startswith("Explanation:")), "Explanation not available.")
 
-    return question_part, correct
+        # specific parsing
+        correct_char = correct_line.split(":")[1].strip().upper()[0] if correct_line else "A"
+        explanation_text = explanation_line.split(":", 1)[1].strip() if ":" in explanation_line else explanation_line
+
+        # Reconstruct the question block for display
+        formatted_question = f"{question}\n" + "\n".join(options)
+
+        return {
+            "question_text": formatted_question,
+            "correct_option": correct_char,
+            "explanation": explanation_text
+        }
+
+    except Exception as e:
+        st.error(f"Error parsing quiz: {e}")
+        return None
 
 
 def evaluate_answer(user, correct):
@@ -214,7 +214,7 @@ if tab == "Chat Q&A":
         with st.chat_message(message["role"], avatar=avatar):
             st.markdown(message["content"])
 
-            # Show sources in nice expander (only for assistant messages)
+            # Show sources in nice expander
             if message["role"] == "assistant" and "sources" in message:
                 with st.expander("📚 Sources", expanded=False):
                     for src in message["sources"]:
@@ -265,7 +265,7 @@ if tab == "Chat Q&A":
         # Save assistant response to history
         st.session_state.chat_messages.append(ai_msg)
 
-        # Auto-scroll to bottom (nice touch)
+        # Auto-scroll to bottom
         st.rerun()
 
 # 7. Quiz Mode Tab
@@ -273,65 +273,76 @@ elif tab == "Quiz Mode":
     st.header("🧠 Quiz Mode")
 
     if st.button("Start / Next Question"):
-        st.session_state.current_quiz, st.session_state.correct_answer = generate_quiz(
-            st.session_state.difficulty
-        )
+        with st.spinner("Drafting a new question..."):
+            quiz_data = generate_quiz(st.session_state.difficulty)
 
-        st.session_state.submitted = False
-        st.session_state.user_answer = None
+            if quiz_data:
+                st.session_state.current_quiz = quiz_data
+                st.session_state.submitted = False
+                st.session_state.user_answer = None
+                st.session_state.score_updated = False
 
-        # CRITICAL: reset radio widget
-        if "quiz_radio" in st.session_state:
-            del st.session_state["quiz_radio"]
+                if "quiz_radio" in st.session_state:
+                    del st.session_state.quiz_radio
 
+                st.rerun()
+
+    # Display
     if st.session_state.current_quiz:
-        st.write(st.session_state.current_quiz)
+        st.markdown(f"### {st.session_state.current_quiz['question_text']}")
 
+        # Radio Button
         st.session_state.user_answer = st.radio(
             "Select your answer:",
             ["A", "B", "C", "D"],
             key="quiz_radio",
+            index=None,
             disabled=st.session_state.submitted
         )
 
+        # Submit Button
         if not st.session_state.submitted:
-            submit = st.button(
-                "Submit Answer",
-                disabled=st.session_state.user_answer is None
-            )
-            if submit:
+            if st.button("Submit Answer", disabled=st.session_state.user_answer is None):
                 st.session_state.submitted = True
+                st.rerun()
 
-                correct = st.session_state.correct_answer
-                if evaluate_answer(st.session_state.user_answer, correct):
-                    st.success("Correct!")
-                    st.session_state.score += 1
-                else:
-                    st.error(f"Incorrect. Correct answer: {correct}")
+        # Result
+        if st.session_state.submitted:
+            user_ans = st.session_state.user_answer
+            correct_ans = st.session_state.current_quiz['correct_option']
 
-                question = st.session_state.current_quiz.split("\n")[0]
-                with st.spinner("Generating explanation..."):
-                    expl = qa_chain.invoke({
-                        "query": f"Explain why {correct} is correct for: {question}"
-                    })
-
-                st.write("**Explanation:**")
-                st.write(expl["result"])
-
+            # Calculate Score
+            # We check a flag to ensure we don't increment total/score on every page reload
+            if not st.session_state.get("score_updated", False):
                 st.session_state.total += 1
+                if user_ans == correct_ans:
+                    st.session_state.score += 1
 
-                acc = st.session_state.score / st.session_state.total
-                if acc > 0.7 and st.session_state.total >= 3:
-                    st.session_state.difficulty = (
-                        "medium" if st.session_state.difficulty == "easy" else "hard"
-                    )
-                elif acc < 0.5:
-                    st.session_state.difficulty = "easy"
+                # Adjust difficulty based on accuracy
+                if st.session_state.total > 0:
+                    acc = st.session_state.score / st.session_state.total
+                    if acc > 0.7 and st.session_state.total >= 3:
+                        st.session_state.difficulty = (
+                            "medium" if st.session_state.difficulty == "easy" else "hard"
+                        )
+                    elif acc < 0.5:
+                        st.session_state.difficulty = "easy"
 
+                st.session_state.score_updated = True
+
+            # Feedback
+            if user_ans == correct_ans:
+                st.success("🎉 Correct!")
+            else:
+                st.error(f"❌ Incorrect. The correct answer was **{correct_ans}**.")
+
+            # Show the pre-generated explanation
+            st.info(f"**Explanation:** {st.session_state.current_quiz['explanation']}")
+
+        # Display current stats
         st.info(
             f"Score: {st.session_state.score}/{st.session_state.total} "
             f"| Difficulty: {st.session_state.difficulty}"
         )
-
     else:
         st.info("Click **Start / Next Question** to begin.")
